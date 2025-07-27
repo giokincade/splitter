@@ -14,6 +14,8 @@ interface AudioProcessorProps {
 
 export default function AudioProcessor({ audioFile, splits, setSplits, onBack }: AudioProcessorProps) {
   const [isLoading, setIsLoading] = useState(true);
+  const [loadingProgress, setLoadingProgress] = useState(0);
+  const [loadingStep, setLoadingStep] = useState('');
   const [audioData, setAudioData] = useState<Float32Array | null>(null);
   const [audioBuffer, setAudioBuffer] = useState<AudioBuffer | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -21,6 +23,9 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
   const [duration, setDuration] = useState(0);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [editingName, setEditingName] = useState('');
+  const [sensitivity, setSensitivity] = useState(0.02);
+  const [minSilenceDuration, setMinSilenceDuration] = useState(2.0);
+  const [minSongDuration, setMinSongDuration] = useState(30.0);
   
   const audioContextRef = useRef<AudioContext | null>(null);
   const sourceRef = useRef<AudioBufferSourceNode | null>(null);
@@ -45,8 +50,14 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
   const processAudioFile = async () => {
     try {
       setIsLoading(true);
+      setLoadingProgress(0);
       
+      setLoadingStep('Reading file...');
+      setLoadingProgress(10);
       const arrayBuffer = await audioFile.arrayBuffer();
+      
+      setLoadingStep('Decoding audio...');
+      setLoadingProgress(30);
       const audioContext = new AudioContext();
       audioContextRef.current = audioContext;
       
@@ -54,13 +65,19 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
       setAudioBuffer(buffer);
       setDuration(buffer.duration);
       
+      setLoadingStep('Processing waveform...');
+      setLoadingProgress(60);
       // Get audio data for waveform visualization
       const channelData = buffer.getChannelData(0);
       setAudioData(channelData);
       
+      setLoadingStep('Detecting splits...');
+      setLoadingProgress(80);
       // Detect splits based on volume changes
       const detectedSplits = detectSplits(channelData, buffer.sampleRate);
       setSplits(detectedSplits);
+      
+      setLoadingProgress(100);
       
     } catch (error) {
       console.error('Error processing audio file:', error);
@@ -71,9 +88,9 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
 
   const detectSplits = (audioData: Float32Array, sampleRate: number): Split[] => {
     const windowSize = sampleRate * 2; // 2 second windows
-    const threshold = 0.02; // Volume threshold
-    const minSilenceDuration = 1.0; // Minimum 1 second of silence
-    const minSongDuration = 30.0; // Minimum 30 seconds per song
+    const threshold = sensitivity; // Use adjustable sensitivity
+    const minSilenceDurationToUse = minSilenceDuration; // Use adjustable silence duration
+    const minSongDurationToUse = minSongDuration; // Use adjustable song duration
     
     const volumes: number[] = [];
     
@@ -106,7 +123,7 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
           const silenceEnd = timeInSeconds;
           const silenceDuration = silenceEnd - silenceStart;
           
-          if (silenceDuration >= minSilenceDuration) {
+          if (silenceDuration >= minSilenceDurationToUse) {
             silentRegions.push({ start: silenceStart, end: silenceEnd });
           }
           silenceStart = -1;
@@ -122,7 +139,7 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
     for (const silence of silentRegions) {
       const songDuration = silence.start - songStart;
       
-      if (songDuration >= minSongDuration) {
+      if (songDuration >= minSongDurationToUse) {
         detectedSplits.push({
           id: `song-${songIndex}`,
           name: `Song ${songIndex}`,
@@ -137,7 +154,7 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
     
     // Add the final song if it's long enough
     const finalDuration = (audioData.length / sampleRate) - songStart;
-    if (finalDuration >= minSongDuration) {
+    if (finalDuration >= minSongDurationToUse) {
       detectedSplits.push({
         id: `song-${songIndex}`,
         name: `Song ${songIndex}`,
@@ -312,6 +329,22 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
     setEditingName('');
   };
 
+  const reprocessSplits = () => {
+    if (!audioData || !audioBuffer) return;
+    
+    setLoadingStep('Reprocessing splits...');
+    setIsLoading(true);
+    setLoadingProgress(0);
+    
+    setTimeout(() => {
+      setLoadingProgress(50);
+      const detectedSplits = detectSplits(audioData, audioBuffer.sampleRate);
+      setSplits(detectedSplits);
+      setLoadingProgress(100);
+      setIsLoading(false);
+    }, 100);
+  };
+
   const downloadSplits = async () => {
     if (!audioBuffer || splits.length === 0) return;
     
@@ -409,9 +442,18 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
       <div className="flex items-center justify-center min-h-screen">
         <Card className="w-full max-w-md">
           <CardContent className="p-6">
-            <div className="text-center">
-              <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full mx-auto mb-4"></div>
-              <p>Processing audio file...</p>
+            <div className="text-center space-y-4">
+              <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full mx-auto"></div>
+              <div className="space-y-2">
+                <p className="font-medium">{loadingStep}</p>
+                <div className="w-full bg-secondary rounded-full h-2">
+                  <div 
+                    className="bg-primary h-2 rounded-full transition-all duration-300"
+                    style={{ width: `${loadingProgress}%` }}
+                  ></div>
+                </div>
+                <p className="text-sm text-muted-foreground">{loadingProgress}%</p>
+              </div>
             </div>
           </CardContent>
         </Card>
@@ -462,6 +504,75 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
               <Button variant="outline" size="sm" onClick={addSplit}>
                 <Plus className="h-4 w-4 mr-2" />
                 Add Split
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Split Detection Settings</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="space-y-2">
+                <label className="text-sm font-medium">
+                  Sensitivity: {sensitivity.toFixed(3)}
+                </label>
+                <input
+                  type="range"
+                  min="0.005"
+                  max="0.1"
+                  step="0.005"
+                  value={sensitivity}
+                  onChange={(e) => setSensitivity(parseFloat(e.target.value))}
+                  className="w-full"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Lower = more sensitive to quiet parts
+                </p>
+              </div>
+              
+              <div className="space-y-2">
+                <label className="text-sm font-medium">
+                  Min Silence: {minSilenceDuration}s
+                </label>
+                <input
+                  type="range"
+                  min="0.5"
+                  max="10"
+                  step="0.5"
+                  value={minSilenceDuration}
+                  onChange={(e) => setMinSilenceDuration(parseFloat(e.target.value))}
+                  className="w-full"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Minimum silence duration to split
+                </p>
+              </div>
+              
+              <div className="space-y-2">
+                <label className="text-sm font-medium">
+                  Min Song: {minSongDuration}s
+                </label>
+                <input
+                  type="range"
+                  min="10"
+                  max="120"
+                  step="10"
+                  value={minSongDuration}
+                  onChange={(e) => setMinSongDuration(parseFloat(e.target.value))}
+                  className="w-full"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Minimum song length
+                </p>
+              </div>
+            </div>
+            
+            <div className="mt-4 flex justify-center">
+              <Button onClick={reprocessSplits} disabled={!audioData}>
+                Reprocess Splits
               </Button>
             </div>
           </CardContent>
