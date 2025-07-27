@@ -27,6 +27,9 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
   const [minSilenceDuration, setMinSilenceDuration] = useState(2.0);
   const [minSongDuration, setMinSongDuration] = useState(30.0);
   const [smoothingWindow, setSmoothingWindow] = useState(5.0); // 5 second smoothing
+  const [draggingSplit, setDraggingSplit] = useState<{ splitIndex: number; edge: 'start' | 'end' } | null>(null);
+  const [hoveredSplit, setHoveredSplit] = useState<{ splitIndex: number; edge: 'start' | 'end' } | null>(null);
+  const waveformCacheRef = useRef<ImageData | null>(null);
   
   const audioContextRef = useRef<AudioContext | null>(null);
   const sourceRef = useRef<AudioBufferSourceNode | null>(null);
@@ -46,7 +49,18 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
     if (audioData) {
       drawWaveform();
     }
-  }, [audioData, splits, currentTime]);
+  }, [audioData, splits, currentTime, hoveredSplit, draggingSplit]);
+
+  useEffect(() => {
+    const handleGlobalMouseUp = () => {
+      setDraggingSplit(null);
+    };
+
+    if (draggingSplit) {
+      document.addEventListener('mouseup', handleGlobalMouseUp);
+      return () => document.removeEventListener('mouseup', handleGlobalMouseUp);
+    }
+  }, [draggingSplit]);
 
   const processAudioFile = async () => {
     try {
@@ -247,11 +261,15 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
     const { width, height } = canvas;
     ctx.clearRect(0, 0, width, height);
     
-    // Draw waveform
-    const samplesPerPixel = Math.floor(audioData.length / width);
-    ctx.strokeStyle = '#3b82f6';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
+    // Simplified for performance - back to original style
+    const samplesPerPixel = Math.max(1, Math.floor(audioData.length / width));
+    
+    // Draw waveform background
+    ctx.fillStyle = '#f1f5f9';
+    ctx.fillRect(0, height / 2, width, 1);
+    
+    // Draw waveform with optimized rendering
+    ctx.fillStyle = '#3b82f6';
     
     for (let x = 0; x < width; x++) {
       const startSample = x * samplesPerPixel;
@@ -260,48 +278,67 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
       let min = 0;
       let max = 0;
       
-      for (let i = startSample; i < endSample; i++) {
+      // Skip some samples for very long recordings for better performance
+      const step = audioData.length > 44100 * 600 ? 4 : 1; // 10+ minutes
+      
+      for (let i = startSample; i < endSample; i += step) {
         const sample = audioData[i];
         if (sample < min) min = sample;
         if (sample > max) max = sample;
       }
       
+      // Convert to screen coordinates
       const y1 = ((min + 1) / 2) * height;
       const y2 = ((max + 1) / 2) * height;
       
-      if (x === 0) {
-        ctx.moveTo(x, y1);
-      } else {
-        ctx.lineTo(x, y1);
-      }
-      ctx.lineTo(x, y2);
+      // Draw filled waveform
+      ctx.fillRect(x, Math.min(y1, y2), 1, Math.abs(y2 - y1) || 1);
     }
     
-    ctx.stroke();
-    
-    // Draw split markers
+    // Draw split markers with hover/drag states (simplified layout)
     splits.forEach((split, index) => {
       const startX = (split.startTime / duration) * width;
       const endX = (split.endTime / duration) * width;
       
+      // Check if this split is being hovered or dragged
+      const isStartHovered = hoveredSplit?.splitIndex === index && hoveredSplit?.edge === 'start';
+      const isEndHovered = hoveredSplit?.splitIndex === index && hoveredSplit?.edge === 'end';
+      const isStartDragging = draggingSplit?.splitIndex === index && draggingSplit?.edge === 'start';
+      const isEndDragging = draggingSplit?.splitIndex === index && draggingSplit?.edge === 'end';
+      
       // Split start line
-      ctx.strokeStyle = '#ef4444';
-      ctx.lineWidth = 2;
+      ctx.strokeStyle = isStartHovered || isStartDragging ? '#dc2626' : '#ef4444';
+      ctx.lineWidth = isStartHovered || isStartDragging ? 3 : 2;
       ctx.beginPath();
       ctx.moveTo(startX, 0);
       ctx.lineTo(startX, height);
       ctx.stroke();
       
       // Split end line
+      ctx.strokeStyle = isEndHovered || isEndDragging ? '#dc2626' : '#ef4444';
+      ctx.lineWidth = isEndHovered || isEndDragging ? 3 : 2;
       ctx.beginPath();
       ctx.moveTo(endX, 0);
       ctx.lineTo(endX, height);
       ctx.stroke();
       
+      // Drag handles (small circles at top)
+      const handleRadius = 4;
+      ctx.fillStyle = isStartHovered || isStartDragging ? '#dc2626' : '#ef4444';
+      ctx.beginPath();
+      ctx.arc(startX, 10, handleRadius, 0, Math.PI * 2);
+      ctx.fill();
+      
+      ctx.fillStyle = isEndHovered || isEndDragging ? '#dc2626' : '#ef4444';
+      ctx.beginPath();
+      ctx.arc(endX, 10, handleRadius, 0, Math.PI * 2);
+      ctx.fill();
+      
       // Label
       ctx.fillStyle = '#ef4444';
       ctx.font = '12px sans-serif';
-      ctx.fillText(split.name, startX + 4, 16);
+      ctx.textAlign = 'left';
+      ctx.fillText(split.name, startX + 4, 26);
     });
     
     // Draw current time indicator
@@ -414,6 +451,110 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
       setLoadingProgress(100);
       setIsLoading(false);
     }, 100);
+  };
+
+  const handleCanvasMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas || !audioData) return;
+    
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    
+    const waveformWidth = canvas.width;
+    
+    if (draggingSplit) {
+      // Update split position while dragging
+      const relativeX = Math.max(0, Math.min(1, x / waveformWidth));
+      const newTime = relativeX * duration;
+      
+      const updatedSplits = [...splits];
+      const split = updatedSplits[draggingSplit.splitIndex];
+      
+      if (draggingSplit.edge === 'start') {
+        split.startTime = Math.max(0, Math.min(newTime, split.endTime - 1));
+      } else {
+        split.endTime = Math.max(split.startTime + 1, Math.min(newTime, duration));
+      }
+      
+      setSplits(updatedSplits);
+      return;
+    }
+    
+    // Check for hover over split handles
+    let newHovered: typeof hoveredSplit = null;
+    
+    for (let i = 0; i < splits.length; i++) {
+      const split = splits[i];
+      const startX = (split.startTime / duration) * waveformWidth;
+      const endX = (split.endTime / duration) * waveformWidth;
+      
+      const handleRadius = 6; // Slightly larger hit area
+      
+      if (Math.abs(x - startX) < handleRadius && y < 20) {
+        newHovered = { splitIndex: i, edge: 'start' };
+        break;
+      } else if (Math.abs(x - endX) < handleRadius && y < 20) {
+        newHovered = { splitIndex: i, edge: 'end' };
+        break;
+      }
+    }
+    
+    setHoveredSplit(newHovered);
+    
+    // Update cursor
+    canvas.style.cursor = newHovered ? 'ew-resize' : 'default';
+  };
+
+  const handleCanvasMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas || !audioData) return;
+    
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    
+    const waveformWidth = canvas.width;
+    
+    // Check for clicks on split handles
+    for (let i = 0; i < splits.length; i++) {
+      const split = splits[i];
+      const startX = (split.startTime / duration) * waveformWidth;
+      const endX = (split.endTime / duration) * waveformWidth;
+      
+      const handleRadius = 6;
+      
+      if (Math.abs(x - startX) < handleRadius && y < 20) {
+        setDraggingSplit({ splitIndex: i, edge: 'start' });
+        return;
+      } else if (Math.abs(x - endX) < handleRadius && y < 20) {
+        setDraggingSplit({ splitIndex: i, edge: 'end' });
+        return;
+      }
+      
+      // Check for right-click to remove split
+      if (e.button === 2 && x > startX && x < endX) {
+        e.preventDefault();
+        removeSplit(i);
+        return;
+      }
+    }
+    
+    // If not clicking on a handle, set playback position
+    const relativeX = x / waveformWidth;
+    const newTime = relativeX * duration;
+    setCurrentTime(newTime);
+  };
+
+  const handleCanvasMouseUp = () => {
+    setDraggingSplit(null);
+  };
+
+  const handleCanvasMouseLeave = () => {
+    setHoveredSplit(null);
+    setDraggingSplit(null);
+    const canvas = canvasRef.current;
+    if (canvas) canvas.style.cursor = 'default';
   };
 
   const downloadSplits = async () => {
@@ -556,7 +697,12 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
               ref={canvasRef}
               width={800}
               height={200}
-              className="w-full border rounded"
+              className="w-full border rounded cursor-default"
+              onMouseMove={handleCanvasMouseMove}
+              onMouseDown={handleCanvasMouseDown}
+              onMouseUp={handleCanvasMouseUp}
+              onMouseLeave={handleCanvasMouseLeave}
+              onContextMenu={(e) => e.preventDefault()}
             />
             
             <div className="flex items-center justify-center space-x-4">
@@ -618,7 +764,7 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
                   className="w-full"
                 />
                 <p className="text-xs text-muted-foreground">
-                  Reduces noise in detection
+                  Averages volume over time to ignore brief noise/coughs
                 </p>
               </div>
               
@@ -636,7 +782,7 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
                   className="w-full"
                 />
                 <p className="text-xs text-muted-foreground">
-                  Minimum silence duration to split
+                  How long a quiet period must last to split songs
                 </p>
               </div>
               
