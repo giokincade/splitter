@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm create:*)",
+      "Bash(mv:*)",
+      "Bash(true)",
+      "Bash(rmdir:*)",
+      "Bash(rm:*)",
+      "Bash(npx astro add:*)",
+      "Bash(npm install)",
+      "Bash(npm install:*)",
+      "Bash(npm run dev:*)",
+      "Bash(fnm install:*)",
+      "Bash(fnm use:*)",
+      "Bash(pkill:*)"
+    ],
+    "deny": []
+  }
+}
