@@ -23,9 +23,10 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
   const [duration, setDuration] = useState(0);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [editingName, setEditingName] = useState('');
-  const [sensitivity, setSensitivity] = useState(0.02);
+  const [sensitivityDb, setSensitivityDb] = useState(-30); // -30 dB threshold
   const [minSilenceDuration, setMinSilenceDuration] = useState(2.0);
   const [minSongDuration, setMinSongDuration] = useState(30.0);
+  const [smoothingWindow, setSmoothingWindow] = useState(5.0); // 5 second smoothing
   
   const audioContextRef = useRef<AudioContext | null>(null);
   const sourceRef = useRef<AudioBufferSourceNode | null>(null);
@@ -61,7 +62,15 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
       const audioContext = new AudioContext();
       audioContextRef.current = audioContext;
       
+      // Create a progress callback for decoding (simulated)
+      const startDecode = Date.now();
       const buffer = await audioContext.decodeAudioData(arrayBuffer);
+      
+      // Update progress during decode simulation
+      const decodeTime = Date.now() - startDecode;
+      if (decodeTime > 1000) { // If decode took more than 1 second
+        setLoadingProgress(50);
+      }
       setAudioBuffer(buffer);
       setDuration(buffer.duration);
       
@@ -87,10 +96,11 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
   };
 
   const detectSplits = (audioData: Float32Array, sampleRate: number): Split[] => {
-    const windowSize = sampleRate * 2; // 2 second windows
-    const threshold = sensitivity; // Use adjustable sensitivity
-    const minSilenceDurationToUse = minSilenceDuration; // Use adjustable silence duration
-    const minSongDurationToUse = minSongDuration; // Use adjustable song duration
+    const windowSize = sampleRate * 0.5; // 0.5 second windows for better resolution
+    const smoothingWindowSamples = Math.floor(smoothingWindow * sampleRate / windowSize);
+    const thresholdLinear = Math.pow(10, sensitivityDb / 20); // Convert dB to linear
+    const minSilenceDurationToUse = minSilenceDuration;
+    const minSongDurationToUse = minSongDuration;
     
     const volumes: number[] = [];
     
@@ -107,47 +117,108 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
       volumes.push(rms);
     }
     
-    // Find silent regions
-    const silentRegions: Array<{ start: number; end: number }> = [];
-    let silenceStart = -1;
-    
+    // Apply smoothing to reduce noise
+    const smoothedVolumes: number[] = [];
     for (let i = 0; i < volumes.length; i++) {
-      const timeInSeconds = (i * windowSize) / sampleRate;
+      const start = Math.max(0, i - Math.floor(smoothingWindowSamples / 2));
+      const end = Math.min(volumes.length, i + Math.floor(smoothingWindowSamples / 2) + 1);
       
-      if (volumes[i] < threshold) {
-        if (silenceStart === -1) {
-          silenceStart = timeInSeconds;
-        }
-      } else {
-        if (silenceStart !== -1) {
-          const silenceEnd = timeInSeconds;
-          const silenceDuration = silenceEnd - silenceStart;
-          
-          if (silenceDuration >= minSilenceDurationToUse) {
-            silentRegions.push({ start: silenceStart, end: silenceEnd });
-          }
-          silenceStart = -1;
+      let sum = 0;
+      for (let j = start; j < end; j++) {
+        sum += volumes[j];
+      }
+      
+      smoothedVolumes.push(sum / (end - start));
+    }
+    
+    // Calculate overall average and standard deviation for better thresholding
+    const avgVolume = smoothedVolumes.reduce((a, b) => a + b, 0) / smoothedVolumes.length;
+    const variance = smoothedVolumes.reduce((a, b) => a + Math.pow(b - avgVolume, 2), 0) / smoothedVolumes.length;
+    const stdDev = Math.sqrt(variance);
+    
+    // Use both absolute threshold and relative threshold based on audio characteristics
+    const relativeThreshold = Math.max(avgVolume * 0.15, avgVolume - stdDev * 0.8);
+    const actualThreshold = Math.max(thresholdLinear, relativeThreshold);
+    
+    // Find potential split points using multiple criteria
+    const potentialSplits: Array<{ time: number; confidence: number }> = [];
+    
+    for (let i = 1; i < smoothedVolumes.length - 1; i++) {
+      const timeInSeconds = (i * windowSize) / sampleRate;
+      const currentVol = smoothedVolumes[i];
+      const prevVol = smoothedVolumes[i - 1];
+      const nextVol = smoothedVolumes[i + 1];
+      
+      let confidence = 0;
+      
+      // Criteria 1: Low volume relative to average
+      if (currentVol < actualThreshold) {
+        confidence += 0.3;
+      }
+      
+      // Criteria 2: Local minimum (valley in waveform)
+      if (currentVol < prevVol && currentVol < nextVol) {
+        confidence += 0.2;
+      }
+      
+      // Criteria 3: Sustained volume drop
+      const lookAhead = Math.min(smoothingWindowSamples, smoothedVolumes.length - i);
+      const lookBehind = Math.min(smoothingWindowSamples, i);
+      
+      const avgBefore = smoothedVolumes.slice(i - lookBehind, i).reduce((a, b) => a + b, 0) / lookBehind;
+      const avgAfter = smoothedVolumes.slice(i, i + lookAhead).reduce((a, b) => a + b, 0) / lookAhead;
+      
+      if (currentVol < avgBefore * 0.5 && currentVol < avgAfter * 0.5) {
+        confidence += 0.3;
+      }
+      
+      // Criteria 4: Long enough gap from previous split
+      const lastSplit = potentialSplits[potentialSplits.length - 1];
+      if (!lastSplit || timeInSeconds - lastSplit.time > minSongDurationToUse * 0.5) {
+        confidence += 0.2;
+      }
+      
+      if (confidence > 0.4) { // Threshold for considering a split
+        potentialSplits.push({ time: timeInSeconds, confidence });
+      }
+    }
+    
+    // Convert high-confidence splits to quiet regions
+    const quietRegions: Array<{ start: number; end: number }> = [];
+    
+    for (const split of potentialSplits) {
+      if (split.confidence > 0.6) {
+        // Find the actual quiet period around this split point
+        const startTime = Math.max(0, split.time - minSilenceDurationToUse / 2);
+        const endTime = Math.min(audioData.length / sampleRate, split.time + minSilenceDurationToUse / 2);
+        
+        // Merge overlapping regions
+        const lastRegion = quietRegions[quietRegions.length - 1];
+        if (lastRegion && startTime <= lastRegion.end) {
+          lastRegion.end = Math.max(lastRegion.end, endTime);
+        } else {
+          quietRegions.push({ start: startTime, end: endTime });
         }
       }
     }
     
-    // Convert silent regions to song splits
+    // Convert quiet regions to song splits
     const detectedSplits: Split[] = [];
     let songStart = 0;
     let songIndex = 1;
     
-    for (const silence of silentRegions) {
-      const songDuration = silence.start - songStart;
+    for (const quiet of quietRegions) {
+      const songDuration = quiet.start - songStart;
       
       if (songDuration >= minSongDurationToUse) {
         detectedSplits.push({
           id: `song-${songIndex}`,
           name: `Song ${songIndex}`,
           startTime: songStart,
-          endTime: silence.start
+          endTime: quiet.start
         });
         
-        songStart = silence.end;
+        songStart = quiet.end;
         songIndex++;
       }
     }
@@ -514,22 +585,40 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
             <CardTitle>Split Detection Settings</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
               <div className="space-y-2">
                 <label className="text-sm font-medium">
-                  Sensitivity: {sensitivity.toFixed(3)}
+                  Threshold: {sensitivityDb} dB
                 </label>
                 <input
                   type="range"
-                  min="0.005"
-                  max="0.1"
-                  step="0.005"
-                  value={sensitivity}
-                  onChange={(e) => setSensitivity(parseFloat(e.target.value))}
+                  min="-60"
+                  max="-10"
+                  step="2"
+                  value={sensitivityDb}
+                  onChange={(e) => setSensitivityDb(parseInt(e.target.value))}
                   className="w-full"
                 />
                 <p className="text-xs text-muted-foreground">
-                  Lower = more sensitive to quiet parts
+                  Higher = more sensitive (closer to 0)
+                </p>
+              </div>
+              
+              <div className="space-y-2">
+                <label className="text-sm font-medium">
+                  Smoothing: {smoothingWindow}s
+                </label>
+                <input
+                  type="range"
+                  min="1"
+                  max="15"
+                  step="1"
+                  value={smoothingWindow}
+                  onChange={(e) => setSmoothingWindow(parseFloat(e.target.value))}
+                  className="w-full"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Reduces noise in detection
                 </p>
               </div>
               
