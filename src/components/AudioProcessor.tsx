@@ -29,7 +29,9 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
   const [smoothingWindow, setSmoothingWindow] = useState(5.0); // 5 second smoothing
   const [draggingSplit, setDraggingSplit] = useState<{ splitIndex: number; edge: 'start' | 'end' } | null>(null);
   const [hoveredSplit, setHoveredSplit] = useState<{ splitIndex: number; edge: 'start' | 'end' } | null>(null);
+  const [currentlyPlayingSplit, setCurrentlyPlayingSplit] = useState<number | null>(null);
   const waveformCacheRef = useRef<ImageData | null>(null);
+  const lastDrawParamsRef = useRef<string>('');
   
   const audioContextRef = useRef<AudioContext | null>(null);
   const sourceRef = useRef<AudioBufferSourceNode | null>(null);
@@ -46,10 +48,13 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
   }, [audioFile]);
 
   useEffect(() => {
-    if (audioData) {
-      drawWaveform();
+    if (audioData && duration > 0) {
+      // Use requestAnimationFrame to ensure canvas is ready
+      requestAnimationFrame(() => {
+        drawWaveform();
+      });
     }
-  }, [audioData, splits, currentTime, hoveredSplit, draggingSplit]);
+  }, [audioData, splits, currentTime, hoveredSplit, draggingSplit, isPlaying, duration]);
 
   useEffect(() => {
     const handleGlobalMouseUp = () => {
@@ -253,22 +258,27 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
 
   const drawWaveform = () => {
     const canvas = canvasRef.current;
-    if (!canvas || !audioData) return;
+    if (!canvas || !audioData || duration <= 0) return;
     
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     
     const { width, height } = canvas;
+    if (width <= 0 || height <= 0) return;
+    
+    // Always clear and redraw - optimized for speed
     ctx.clearRect(0, 0, width, height);
     
-    // Simplified for performance - back to original style
+    // Aggressive optimization for long recordings
     const samplesPerPixel = Math.max(1, Math.floor(audioData.length / width));
+    const isVeryLong = audioData.length > 44100 * 300; // 5+ minutes
+    const step = isVeryLong ? Math.max(1, Math.floor(samplesPerPixel / 16)) : 1; // More aggressive skip
     
     // Draw waveform background
     ctx.fillStyle = '#f1f5f9';
     ctx.fillRect(0, height / 2, width, 1);
     
-    // Draw waveform with optimized rendering
+    // Direct rendering without pre-calculation for better performance
     ctx.fillStyle = '#3b82f6';
     
     for (let x = 0; x < width; x++) {
@@ -278,27 +288,28 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
       let min = 0;
       let max = 0;
       
-      // Skip some samples for very long recordings for better performance
-      const step = audioData.length > 44100 * 600 ? 4 : 1; // 10+ minutes
-      
       for (let i = startSample; i < endSample; i += step) {
         const sample = audioData[i];
         if (sample < min) min = sample;
         if (sample > max) max = sample;
       }
       
-      // Convert to screen coordinates
       const y1 = ((min + 1) / 2) * height;
       const y2 = ((max + 1) / 2) * height;
       
-      // Draw filled waveform
-      ctx.fillRect(x, Math.min(y1, y2), 1, Math.abs(y2 - y1) || 1);
+      const rectHeight = Math.abs(y2 - y1) || 1;
+      ctx.fillRect(x, Math.min(y1, y2), 1, rectHeight);
     }
     
     // Draw split markers with hover/drag states (simplified layout)
     splits.forEach((split, index) => {
-      const startX = (split.startTime / duration) * width;
-      const endX = (split.endTime / duration) * width;
+      // Ensure times are valid
+      if (split.startTime < 0 || split.endTime > duration || split.startTime >= split.endTime) {
+        return; // Skip invalid splits
+      }
+      
+      const startX = Math.round((split.startTime / duration) * width);
+      const endX = Math.round((split.endTime / duration) * width);
       
       // Check if this split is being hovered or dragged
       const isStartHovered = hoveredSplit?.splitIndex === index && hoveredSplit?.edge === 'start';
@@ -353,12 +364,13 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
     }
   };
 
-  const playAudio = async (startTime?: number, endTime?: number) => {
+  const playAudio = async (startTime?: number, endTime?: number, splitIndex?: number) => {
     if (!audioBuffer || !audioContextRef.current) return;
     
     // Stop current playback
     if (sourceRef.current) {
       sourceRef.current.stop();
+      sourceRef.current = null;
     }
     
     const source = audioContextRef.current.createBufferSource();
@@ -366,16 +378,19 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
     source.connect(audioContextRef.current.destination);
     
     const start = startTime || currentTime;
-    const duration = endTime ? endTime - start : undefined;
+    const playDuration = endTime ? endTime - start : undefined;
     
-    source.start(0, start, duration);
+    source.start(0, start, playDuration);
     sourceRef.current = source;
     startTimeRef.current = audioContextRef.current.currentTime - start;
     
     setIsPlaying(true);
+    setCurrentlyPlayingSplit(splitIndex ?? null);
     
     source.onended = () => {
       setIsPlaying(false);
+      setCurrentlyPlayingSplit(null);
+      sourceRef.current = null;
       if (!endTime) {
         setCurrentTime(0);
       }
@@ -383,10 +398,12 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
     
     // Update current time during playback
     const updateTime = () => {
-      if (isPlaying && audioContextRef.current) {
+      if (sourceRef.current && audioContextRef.current) {
         const elapsed = audioContextRef.current.currentTime - startTimeRef.current;
-        setCurrentTime(Math.min(elapsed, audioBuffer.duration));
-        if (elapsed < audioBuffer.duration) {
+        const newTime = Math.min(start + elapsed, audioBuffer.duration);
+        setCurrentTime(newTime);
+        
+        if (elapsed < (playDuration || audioBuffer.duration - start)) {
           requestAnimationFrame(updateTime);
         }
       }
@@ -400,6 +417,7 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
       sourceRef.current = null;
     }
     setIsPlaying(false);
+    setCurrentlyPlayingSplit(null);
   };
 
   const formatTime = (time: number) => {
@@ -409,13 +427,24 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
   };
 
   const addSplit = () => {
+    // Ensure we have valid current time and duration
+    if (!duration || currentTime < 0 || currentTime >= duration) return;
+    
     const newSplit: Split = {
       id: `split-${Date.now()}`,
       name: `Song ${splits.length + 1}`,
-      startTime: currentTime,
+      startTime: Math.max(0, currentTime),
       endTime: Math.min(currentTime + 60, duration) // Default 1 minute duration
     };
-    setSplits([...splits, newSplit].sort((a, b) => a.startTime - b.startTime));
+    
+    // Ensure the new split doesn't overlap with existing ones
+    const validSplit = splits.every(existing => 
+      newSplit.endTime <= existing.startTime || newSplit.startTime >= existing.endTime
+    );
+    
+    if (validSplit) {
+      setSplits([...splits, newSplit].sort((a, b) => a.startTime - b.startTime));
+    }
   };
 
   const removeSplit = (index: number) => {
@@ -455,46 +484,55 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
 
   const handleCanvasMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
-    if (!canvas || !audioData) return;
+    if (!canvas || !audioData || duration <= 0) return;
     
     const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
     
-    const waveformWidth = canvas.width;
+    const waveformWidth = rect.width; // Use actual rendered width
     
     if (draggingSplit) {
       // Update split position while dragging
       const relativeX = Math.max(0, Math.min(1, x / waveformWidth));
       const newTime = relativeX * duration;
       
-      const updatedSplits = [...splits];
-      const split = updatedSplits[draggingSplit.splitIndex];
-      
-      if (draggingSplit.edge === 'start') {
-        split.startTime = Math.max(0, Math.min(newTime, split.endTime - 1));
-      } else {
-        split.endTime = Math.max(split.startTime + 1, Math.min(newTime, duration));
+      // Validate split index exists
+      if (draggingSplit.splitIndex >= 0 && draggingSplit.splitIndex < splits.length) {
+        const updatedSplits = [...splits];
+        const split = updatedSplits[draggingSplit.splitIndex];
+        
+        if (draggingSplit.edge === 'start') {
+          split.startTime = Math.max(0, Math.min(newTime, split.endTime - 1));
+        } else {
+          split.endTime = Math.max(split.startTime + 1, Math.min(newTime, duration));
+        }
+        
+        // Filter out any invalid splits and update
+        const validSplits = updatedSplits.filter(s => 
+          s.startTime >= 0 && 
+          s.endTime <= duration && 
+          s.startTime < s.endTime
+        );
+        setSplits(validSplits);
       }
-      
-      setSplits(updatedSplits);
       return;
     }
     
-    // Check for hover over split handles
+    // Check for hover over split handles - be more precise
     let newHovered: typeof hoveredSplit = null;
+    const handleRadius = 8; // Slightly larger hit area
     
     for (let i = 0; i < splits.length; i++) {
       const split = splits[i];
       const startX = (split.startTime / duration) * waveformWidth;
       const endX = (split.endTime / duration) * waveformWidth;
       
-      const handleRadius = 6; // Slightly larger hit area
-      
-      if (Math.abs(x - startX) < handleRadius && y < 20) {
+      // Check start handle first (higher priority)
+      if (Math.abs(x - startX) < handleRadius && y < 30) {
         newHovered = { splitIndex: i, edge: 'start' };
         break;
-      } else if (Math.abs(x - endX) < handleRadius && y < 20) {
+      } else if (Math.abs(x - endX) < handleRadius && y < 30) {
         newHovered = { splitIndex: i, edge: 'end' };
         break;
       }
@@ -503,47 +541,56 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
     setHoveredSplit(newHovered);
     
     // Update cursor
-    canvas.style.cursor = newHovered ? 'ew-resize' : 'default';
+    canvas.style.cursor = newHovered ? 'ew-resize' : 'pointer';
   };
 
   const handleCanvasMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
-    if (!canvas || !audioData) return;
+    if (!canvas || !audioData || duration <= 0) return;
     
     const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
     
-    const waveformWidth = canvas.width;
+    const waveformWidth = rect.width;
+    const handleRadius = 8;
     
-    // Check for clicks on split handles
+    // Check for clicks on split handles first (priority over other actions)
     for (let i = 0; i < splits.length; i++) {
       const split = splits[i];
       const startX = (split.startTime / duration) * waveformWidth;
       const endX = (split.endTime / duration) * waveformWidth;
       
-      const handleRadius = 6;
-      
-      if (Math.abs(x - startX) < handleRadius && y < 20) {
+      // Check start handle
+      if (Math.abs(x - startX) < handleRadius && y < 30) {
         setDraggingSplit({ splitIndex: i, edge: 'start' });
+        e.preventDefault();
         return;
-      } else if (Math.abs(x - endX) < handleRadius && y < 20) {
+      } 
+      // Check end handle
+      else if (Math.abs(x - endX) < handleRadius && y < 30) {
         setDraggingSplit({ splitIndex: i, edge: 'end' });
+        e.preventDefault();
         return;
       }
       
-      // Check for right-click to remove split
-      if (e.button === 2 && x > startX && x < endX) {
+      // Check for right-click to remove split (anywhere in split region)
+      if (e.button === 2 && x >= startX && x <= endX && y > 30) {
         e.preventDefault();
         removeSplit(i);
         return;
       }
     }
     
-    // If not clicking on a handle, set playback position
-    const relativeX = x / waveformWidth;
+    // If not clicking on a handle, click-to-play functionality
+    const relativeX = Math.max(0, Math.min(1, x / waveformWidth));
     const newTime = relativeX * duration;
     setCurrentTime(newTime);
+    
+    // Start playing from the clicked position
+    if (!isPlaying) {
+      playAudio(newTime);
+    }
   };
 
   const handleCanvasMouseUp = () => {
@@ -552,7 +599,7 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
 
   const handleCanvasMouseLeave = () => {
     setHoveredSplit(null);
-    setDraggingSplit(null);
+    // Don't clear dragging state on mouse leave - let global mouseup handle it
     const canvas = canvasRef.current;
     if (canvas) canvas.style.cursor = 'default';
   };
@@ -849,9 +896,18 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => playAudio(split.startTime, split.endTime)}
+                      onClick={() => {
+                        if (currentlyPlayingSplit === index) {
+                          stopAudio();
+                        } else {
+                          playAudio(split.startTime, split.endTime, index);
+                        }
+                      }}
                     >
-                      <Play className="h-3 w-3" />
+                      {currentlyPlayingSplit === index ? 
+                        <Pause className="h-3 w-3" /> : 
+                        <Play className="h-3 w-3" />
+                      }
                     </Button>
                     
                     <Button
