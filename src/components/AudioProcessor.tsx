@@ -4,6 +4,7 @@ import { Button } from './ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
 import { Input } from './ui/input';
 import type { Split } from './AudioSplitterApp';
+import { audioCache } from '../lib/audioCache';
 
 interface AudioProcessorProps {
   audioFile: File;
@@ -17,6 +18,16 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
   const [loadingProgress, setLoadingProgress] = useState(0);
   const [loadingStep, setLoadingStep] = useState('');
   const [audioData, setAudioData] = useState<Float32Array | null>(null);
+  
+  // Debug audioData changes
+  useEffect(() => {
+    debugLog('STATE', 'audioData changed', {
+      hasAudioData: !!audioData,
+      audioDataLength: audioData?.length,
+      audioDataType: typeof audioData,
+      audioDataConstructor: audioData?.constructor.name
+    });
+  }, [audioData]);
   const [audioBuffer, setAudioBuffer] = useState<AudioBuffer | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -31,6 +42,7 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
   const [hoveredSplit, setHoveredSplit] = useState<{ splitIndex: number; edge: 'start' | 'end' } | null>(null);
   const [currentlyPlayingSplit, setCurrentlyPlayingSplit] = useState<number | null>(null);
   const [debugMode, setDebugMode] = useState(false);
+  const [usedCache, setUsedCache] = useState(false);
   const waveformCacheRef = useRef<ImageData | null>(null);
   const lastDrawParamsRef = useRef<string>('');
   
@@ -46,9 +58,21 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
   const sourceRef = useRef<AudioBufferSourceNode | null>(null);
   const startTimeRef = useRef<number>(0);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const audioDataRef = useRef<Float32Array | null>(null);
+  
+  // Keep audioDataRef in sync
+  useEffect(() => {
+    audioDataRef.current = audioData;
+  }, [audioData]);
 
   useEffect(() => {
     processAudioFile();
+    
+    // Clean up old cache entries (older than 7 days) in the background
+    audioCache.clearOldCache().catch(err => {
+      debugLog('CACHE', 'Failed to clear old cache', err);
+    });
+    
     return () => {
       if (audioContextRef.current) {
         audioContextRef.current.close();
@@ -59,6 +83,7 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
   useEffect(() => {
     debugLog('EFFECT', 'Waveform draw effect triggered', {
       hasAudioData: !!audioData,
+      audioDataLength: audioData?.length,
       duration,
       splitsLength: splits.length,
       currentTime,
@@ -67,20 +92,23 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
       isPlaying
     });
     
-    if (audioData && duration > 0) {
+    if (audioData && audioData.length > 0 && duration > 0) {
       debugLog('EFFECT', 'Scheduling waveform draw');
       // Use requestAnimationFrame to ensure canvas is ready
       requestAnimationFrame(() => {
-        debugLog('EFFECT', 'Executing scheduled waveform draw');
+        debugLog('EFFECT', 'Executing scheduled waveform draw', {
+          audioDataLengthInCallback: audioData?.length
+        });
         drawWaveform();
       });
     } else {
       debugLog('EFFECT', 'Skipping waveform draw - missing data', {
         hasAudioData: !!audioData,
+        audioDataLength: audioData?.length,
         duration
       });
     }
-  }, [audioData, splits, currentTime, hoveredSplit, draggingSplit, isPlaying, duration]);
+  }, [audioData, splits, currentTime, hoveredSplit, draggingSplit, isPlaying, duration, debugLog]);
 
   useEffect(() => {
     const handleGlobalMouseUp = () => {
@@ -97,49 +125,110 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
     try {
       setIsLoading(true);
       setLoadingProgress(0);
+      setUsedCache(false);
       
-      setLoadingStep('Reading file...');
+      // Initialize audio cache
+      setLoadingStep('Initializing cache...');
+      setLoadingProgress(5);
+      await audioCache.init();
+      
+      // Check for cached audio data
+      setLoadingStep('Checking cache...');
       setLoadingProgress(10);
-      const arrayBuffer = await audioFile.arrayBuffer();
+      const cachedData = await audioCache.getCachedAudio(audioFile);
       
-      setLoadingStep('Decoding audio...');
-      setLoadingProgress(30);
-      const audioContext = new AudioContext();
-      audioContextRef.current = audioContext;
+      let audioBuffer: AudioBuffer;
+      let channelData: Float32Array;
       
-      // Create a progress callback for decoding (simulated)
-      const startDecode = Date.now();
-      const buffer = await audioContext.decodeAudioData(arrayBuffer);
-      
-      // Update progress during decode simulation
-      const decodeTime = Date.now() - startDecode;
-      if (decodeTime > 1000) { // If decode took more than 1 second
+      if (cachedData) {
+        debugLog('CACHE', 'Using cached audio data', {
+          fileName: cachedData.fileName,
+          cachedAt: new Date(cachedData.cachedAt).toISOString(),
+          duration: cachedData.duration
+        });
+        
+        setLoadingStep('Loading from cache...');
+        setLoadingProgress(30);
+        setUsedCache(true);
+        
+        // Create AudioBuffer from cached data
+        const audioContext = new AudioContext();
+        audioContextRef.current = audioContext;
+        
+        audioBuffer = audioContext.createBuffer(1, cachedData.audioData.length, cachedData.sampleRate);
+        audioBuffer.getChannelData(0).set(cachedData.audioData);
+        
+        channelData = cachedData.audioData;
+        setDuration(cachedData.duration);
+        setLoadingProgress(60);
+        
+      } else {
+        debugLog('CACHE', 'No cache found, processing file', {
+          fileName: audioFile.name,
+          fileSize: audioFile.size
+        });
+        
+        setLoadingStep('Reading file...');
+        setLoadingProgress(15);
+        const arrayBuffer = await audioFile.arrayBuffer();
+        
+        setLoadingStep('Decoding audio...');
+        setLoadingProgress(25);
+        const audioContext = new AudioContext();
+        audioContextRef.current = audioContext;
+        
+        const startDecode = Date.now();
+        audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+        const decodeTime = Date.now() - startDecode;
+        
+        debugLog('AUDIO', 'Audio decoded', { decodeTime });
+        
         setLoadingProgress(50);
+        setDuration(audioBuffer.duration);
+        
+        // Get audio data for waveform visualization
+        channelData = audioBuffer.getChannelData(0);
+        
+        // Cache the decoded data for future use
+        setLoadingStep('Caching audio data...');
+        setLoadingProgress(55);
+        try {
+          await audioCache.setCachedAudio(
+            audioFile,
+            channelData,
+            audioBuffer.sampleRate,
+            audioBuffer.duration
+          );
+          debugLog('CACHE', 'Audio data cached successfully');
+        } catch (cacheError) {
+          debugLog('CACHE', 'Failed to cache audio data', cacheError);
+          // Continue anyway, caching is not critical
+        }
       }
-      setAudioBuffer(buffer);
-      setDuration(buffer.duration);
       
       setLoadingStep('Processing waveform...');
-      setLoadingProgress(60);
-      // Get audio data for waveform visualization
-      const channelData = buffer.getChannelData(0);
-      debugLog('AUDIO', 'Audio data extracted', {
+      setLoadingProgress(70);
+      setAudioBuffer(audioBuffer);
+      
+      debugLog('AUDIO', 'Audio data ready', {
         channelDataLength: channelData.length,
-        sampleRate: buffer.sampleRate,
-        duration: buffer.duration
+        sampleRate: audioBuffer.sampleRate,
+        duration: audioBuffer.duration,
+        usedCache: cachedData !== null
       });
       setAudioData(channelData);
       
       setLoadingStep('Detecting splits...');
-      setLoadingProgress(80);
+      setLoadingProgress(85);
       // Detect splits based on volume changes
-      const detectedSplits = detectSplits(channelData, buffer.sampleRate);
+      const detectedSplits = detectSplits(channelData, audioBuffer.sampleRate);
       setSplits(detectedSplits);
       
       setLoadingProgress(100);
       
     } catch (error) {
       console.error('Error processing audio file:', error);
+      debugLog('ERROR', 'Failed to process audio file', error);
     } finally {
       setIsLoading(false);
     }
@@ -298,10 +387,32 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
       return;
     }
     
-    if (!audioData) {
-      debugLog('DRAW', 'ERROR: No audioData');
+    // Check both state and ref
+    const currentAudioData = audioDataRef.current;
+    debugLog('DRAW', 'AudioData comparison', {
+      stateAudioData: !!audioData,
+      stateAudioDataLength: audioData?.length,
+      refAudioData: !!currentAudioData,
+      refAudioDataLength: currentAudioData?.length,
+      areEqual: audioData === currentAudioData
+    });
+    
+    if (!currentAudioData) {
+      debugLog('DRAW', 'ERROR: No audioData in ref');
       return;
     }
+    
+    if (currentAudioData.length === 0) {
+      debugLog('DRAW', 'ERROR: audioData is empty - this is the bug!', {
+        audioDataType: typeof currentAudioData,
+        audioDataConstructor: currentAudioData.constructor.name,
+        audioDataLength: currentAudioData.length
+      });
+      return;
+    }
+    
+    // Use the ref data instead of state
+    const audioDataToUse = currentAudioData;
     
     if (duration <= 0) {
       debugLog('DRAW', 'ERROR: Invalid duration', { duration });
@@ -325,7 +436,7 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
     }
     
     debugLog('DRAW', 'Starting waveform draw', {
-      audioDataLength: audioData.length,
+      audioDataLength: audioDataToUse.length,
       duration,
       splitsCount: splits.length
     });
@@ -335,15 +446,15 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
     debugLog('DRAW', 'Canvas cleared');
     
     // Aggressive optimization for long recordings
-    const samplesPerPixel = Math.max(1, Math.floor(audioData.length / width));
-    const isVeryLong = audioData.length > 44100 * 300; // 5+ minutes
+    const samplesPerPixel = Math.max(1, Math.floor(audioDataToUse.length / width));
+    const isVeryLong = audioDataToUse.length > 44100 * 300; // 5+ minutes
     const step = isVeryLong ? Math.max(1, Math.floor(samplesPerPixel / 16)) : 1; // More aggressive skip
     
     debugLog('DRAW', 'Waveform parameters', {
       samplesPerPixel,
       isVeryLong,
       step,
-      totalSamples: audioData.length
+      totalSamples: audioDataToUse.length
     });
     
     try {
@@ -358,13 +469,13 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
       
       for (let x = 0; x < width; x++) {
         const startSample = x * samplesPerPixel;
-        const endSample = Math.min(startSample + samplesPerPixel, audioData.length);
+        const endSample = Math.min(startSample + samplesPerPixel, audioDataToUse.length);
         
         let min = 0;
         let max = 0;
         
         for (let i = startSample; i < endSample; i += step) {
-          const sample = audioData[i];
+          const sample = audioDataToUse[i];
           if (sample < min) min = sample;
           if (sample > max) max = sample;
         }
@@ -854,6 +965,19 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
             >
               🐛 Debug
             </Button>
+            {debugMode && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={async () => {
+                  const cacheInfo = await audioCache.getCacheSize();
+                  alert(`Cache: ${cacheInfo.count} files, ~${cacheInfo.estimatedSizeMB.toFixed(1)} MB`);
+                }}
+                title="Show cache information"
+              >
+                📊 Cache Info
+              </Button>
+            )}
           </div>
           <h1 className="text-2xl font-bold">Audio Splitter</h1>
           <Button onClick={downloadSplits} disabled={splits.length === 0}>
@@ -864,7 +988,14 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
 
         <Card>
           <CardHeader>
-            <CardTitle>Waveform & Controls</CardTitle>
+            <div className="flex items-center justify-between">
+              <CardTitle>Waveform & Controls</CardTitle>
+              {usedCache && (
+                <span className="text-xs bg-green-100 text-green-800 px-2 py-1 rounded-full">
+                  📦 Loaded from cache
+                </span>
+              )}
+            </div>
           </CardHeader>
           <CardContent className="space-y-4">
             <canvas
