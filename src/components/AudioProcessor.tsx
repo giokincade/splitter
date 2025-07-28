@@ -30,8 +30,17 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
   const [draggingSplit, setDraggingSplit] = useState<{ splitIndex: number; edge: 'start' | 'end' } | null>(null);
   const [hoveredSplit, setHoveredSplit] = useState<{ splitIndex: number; edge: 'start' | 'end' } | null>(null);
   const [currentlyPlayingSplit, setCurrentlyPlayingSplit] = useState<number | null>(null);
+  const [debugMode, setDebugMode] = useState(false);
   const waveformCacheRef = useRef<ImageData | null>(null);
   const lastDrawParamsRef = useRef<string>('');
+  
+  // Debug logging system
+  const debugLog = (category: string, message: string, data?: any) => {
+    if (debugMode) {
+      const timestamp = new Date().toISOString().split('T')[1];
+      console.log(`[${timestamp}] [${category}] ${message}`, data || '');
+    }
+  };
   
   const audioContextRef = useRef<AudioContext | null>(null);
   const sourceRef = useRef<AudioBufferSourceNode | null>(null);
@@ -48,10 +57,27 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
   }, [audioFile]);
 
   useEffect(() => {
+    debugLog('EFFECT', 'Waveform draw effect triggered', {
+      hasAudioData: !!audioData,
+      duration,
+      splitsLength: splits.length,
+      currentTime,
+      hoveredSplit,
+      draggingSplit,
+      isPlaying
+    });
+    
     if (audioData && duration > 0) {
+      debugLog('EFFECT', 'Scheduling waveform draw');
       // Use requestAnimationFrame to ensure canvas is ready
       requestAnimationFrame(() => {
+        debugLog('EFFECT', 'Executing scheduled waveform draw');
         drawWaveform();
+      });
+    } else {
+      debugLog('EFFECT', 'Skipping waveform draw - missing data', {
+        hasAudioData: !!audioData,
+        duration
       });
     }
   }, [audioData, splits, currentTime, hoveredSplit, draggingSplit, isPlaying, duration]);
@@ -97,6 +123,11 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
       setLoadingProgress(60);
       // Get audio data for waveform visualization
       const channelData = buffer.getChannelData(0);
+      debugLog('AUDIO', 'Audio data extracted', {
+        channelDataLength: channelData.length,
+        sampleRate: buffer.sampleRate,
+        duration: buffer.duration
+      });
       setAudioData(channelData);
       
       setLoadingStep('Detecting splits...');
@@ -257,54 +288,114 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
   };
 
   const drawWaveform = () => {
+    debugLog('DRAW', 'drawWaveform called');
+    
     const canvas = canvasRef.current;
-    if (!canvas || !audioData || duration <= 0) return;
+    debugLog('DRAW', 'Canvas check', { hasCanvas: !!canvas });
+    
+    if (!canvas) {
+      debugLog('DRAW', 'ERROR: No canvas found');
+      return;
+    }
+    
+    if (!audioData) {
+      debugLog('DRAW', 'ERROR: No audioData');
+      return;
+    }
+    
+    if (duration <= 0) {
+      debugLog('DRAW', 'ERROR: Invalid duration', { duration });
+      return;
+    }
     
     const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    debugLog('DRAW', 'Context check', { hasContext: !!ctx });
+    
+    if (!ctx) {
+      debugLog('DRAW', 'ERROR: Could not get 2d context');
+      return;
+    }
     
     const { width, height } = canvas;
-    if (width <= 0 || height <= 0) return;
+    debugLog('DRAW', 'Canvas dimensions', { width, height });
+    
+    if (width <= 0 || height <= 0) {
+      debugLog('DRAW', 'ERROR: Invalid canvas dimensions', { width, height });
+      return;
+    }
+    
+    debugLog('DRAW', 'Starting waveform draw', {
+      audioDataLength: audioData.length,
+      duration,
+      splitsCount: splits.length
+    });
     
     // Always clear and redraw - optimized for speed
     ctx.clearRect(0, 0, width, height);
+    debugLog('DRAW', 'Canvas cleared');
     
     // Aggressive optimization for long recordings
     const samplesPerPixel = Math.max(1, Math.floor(audioData.length / width));
     const isVeryLong = audioData.length > 44100 * 300; // 5+ minutes
     const step = isVeryLong ? Math.max(1, Math.floor(samplesPerPixel / 16)) : 1; // More aggressive skip
     
-    // Draw waveform background
-    ctx.fillStyle = '#f1f5f9';
-    ctx.fillRect(0, height / 2, width, 1);
+    debugLog('DRAW', 'Waveform parameters', {
+      samplesPerPixel,
+      isVeryLong,
+      step,
+      totalSamples: audioData.length
+    });
     
-    // Direct rendering without pre-calculation for better performance
-    ctx.fillStyle = '#3b82f6';
-    
-    for (let x = 0; x < width; x++) {
-      const startSample = x * samplesPerPixel;
-      const endSample = Math.min(startSample + samplesPerPixel, audioData.length);
+    try {
+      // Draw waveform background
+      ctx.fillStyle = '#f1f5f9';
+      ctx.fillRect(0, height / 2, width, 1);
+      debugLog('DRAW', 'Background drawn');
       
-      let min = 0;
-      let max = 0;
+      // Direct rendering without pre-calculation for better performance
+      ctx.fillStyle = '#3b82f6';
+      debugLog('DRAW', 'Starting waveform data rendering');
       
-      for (let i = startSample; i < endSample; i += step) {
-        const sample = audioData[i];
-        if (sample < min) min = sample;
-        if (sample > max) max = sample;
+      for (let x = 0; x < width; x++) {
+        const startSample = x * samplesPerPixel;
+        const endSample = Math.min(startSample + samplesPerPixel, audioData.length);
+        
+        let min = 0;
+        let max = 0;
+        
+        for (let i = startSample; i < endSample; i += step) {
+          const sample = audioData[i];
+          if (sample < min) min = sample;
+          if (sample > max) max = sample;
+        }
+        
+        const y1 = ((min + 1) / 2) * height;
+        const y2 = ((max + 1) / 2) * height;
+        
+        const rectHeight = Math.abs(y2 - y1) || 1;
+        ctx.fillRect(x, Math.min(y1, y2), 1, rectHeight);
       }
       
-      const y1 = ((min + 1) / 2) * height;
-      const y2 = ((max + 1) / 2) * height;
-      
-      const rectHeight = Math.abs(y2 - y1) || 1;
-      ctx.fillRect(x, Math.min(y1, y2), 1, rectHeight);
+      debugLog('DRAW', 'Waveform data rendered');
+    } catch (error) {
+      debugLog('DRAW', 'ERROR during waveform rendering', error);
     }
     
     // Draw split markers with hover/drag states (simplified layout)
+    debugLog('DRAW', 'Drawing split markers', { splitsCount: splits.length });
+    
     splits.forEach((split, index) => {
       // Ensure times are valid
       if (split.startTime < 0 || split.endTime > duration || split.startTime >= split.endTime) {
+        debugLog('DRAW', 'Skipping invalid split', { 
+          index, 
+          split: { 
+            startTime: split.startTime, 
+            endTime: split.endTime, 
+            name: split.name 
+          },
+          duration 
+        });
         return; // Skip invalid splits
       }
       
@@ -365,7 +456,15 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
   };
 
   const playAudio = async (startTime?: number, endTime?: number, splitIndex?: number) => {
-    if (!audioBuffer || !audioContextRef.current) return;
+    debugLog('AUDIO', 'playAudio called', { startTime, endTime, splitIndex });
+    
+    if (!audioBuffer || !audioContextRef.current) {
+      debugLog('AUDIO', 'playAudio early return - missing audio', {
+        hasAudioBuffer: !!audioBuffer,
+        hasAudioContext: !!audioContextRef.current
+      });
+      return;
+    }
     
     // Stop current playback
     if (sourceRef.current) {
@@ -484,13 +583,26 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
 
   const handleCanvasMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
-    if (!canvas || !audioData || duration <= 0) return;
+    if (!canvas || !audioData || duration <= 0) {
+      debugLog('MOUSE', 'MouseMove early return', {
+        hasCanvas: !!canvas,
+        hasAudioData: !!audioData,
+        duration
+      });
+      return;
+    }
     
     const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
     
     const waveformWidth = rect.width; // Use actual rendered width
+    
+    debugLog('MOUSE', 'MouseMove', {
+      x, y, waveformWidth,
+      draggingSplit,
+      splitsLength: splits.length
+    });
     
     if (draggingSplit) {
       // Update split position while dragging
@@ -514,6 +626,11 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
           s.endTime <= duration && 
           s.startTime < s.endTime
         );
+        debugLog('STATE', 'Updating splits after drag', {
+          originalCount: updatedSplits.length,
+          validCount: validSplits.length,
+          draggingSplit
+        });
         setSplits(validSplits);
       }
       return;
@@ -724,10 +841,20 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
     <div className="min-h-screen bg-background p-4">
       <div className="max-w-6xl mx-auto space-y-6">
         <div className="flex items-center justify-between">
-          <Button variant="outline" onClick={onBack}>
-            <ArrowLeft className="h-4 w-4 mr-2" />
-            Back
-          </Button>
+          <div className="flex items-center space-x-2">
+            <Button variant="outline" onClick={onBack}>
+              <ArrowLeft className="h-4 w-4 mr-2" />
+              Back
+            </Button>
+            <Button 
+              variant={debugMode ? "default" : "outline"} 
+              size="sm"
+              onClick={() => setDebugMode(!debugMode)}
+              title="Toggle debug logging in console"
+            >
+              🐛 Debug
+            </Button>
+          </div>
           <h1 className="text-2xl font-bold">Audio Splitter</h1>
           <Button onClick={downloadSplits} disabled={splits.length === 0}>
             <Download className="h-4 w-4 mr-2" />
