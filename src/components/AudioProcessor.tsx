@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { ArrowLeft, Play, Pause, Download, Plus, Minus, Edit3 } from 'lucide-react';
 import { Button } from './ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
@@ -692,7 +692,7 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
     }, 100);
   };
 
-  const handleCanvasMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const handleCanvasMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
     if (!canvas || !audioData || duration <= 0) {
       debugLog('MOUSE', 'MouseMove early return', {
@@ -751,17 +751,33 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
     let newHovered: typeof hoveredSplit = null;
     const handleRadius = 8; // Slightly larger hit area
     
+    debugLog('MOUSE', 'Checking hover detection', {
+      splitsCount: splits.length,
+      handleRadius,
+      mouseY: y
+    });
+    
     for (let i = 0; i < splits.length; i++) {
       const split = splits[i];
       const startX = (split.startTime / duration) * waveformWidth;
       const endX = (split.endTime / duration) * waveformWidth;
       
+      debugLog('MOUSE', `Split ${i} positions`, {
+        splitName: split.name,
+        startX, endX,
+        startDistance: Math.abs(x - startX),
+        endDistance: Math.abs(x - endX),
+        withinRadius: Math.abs(x - startX) < handleRadius || Math.abs(x - endX) < handleRadius
+      });
+      
       // Check start handle first (higher priority)
       if (Math.abs(x - startX) < handleRadius && y < 30) {
         newHovered = { splitIndex: i, edge: 'start' };
+        debugLog('MOUSE', 'Hovering start handle', { splitIndex: i });
         break;
       } else if (Math.abs(x - endX) < handleRadius && y < 30) {
         newHovered = { splitIndex: i, edge: 'end' };
+        debugLog('MOUSE', 'Hovering end handle', { splitIndex: i });
         break;
       }
     }
@@ -770,9 +786,9 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
     
     // Update cursor
     canvas.style.cursor = newHovered ? 'ew-resize' : 'pointer';
-  };
+  }, [audioData, duration, splits, draggingSplit, hoveredSplit, debugLog]);
 
-  const handleCanvasMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+  const handleCanvasMouseDown = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
     if (!canvas || !audioData || duration <= 0) return;
     
@@ -819,18 +835,18 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
     if (!isPlaying) {
       playAudio(newTime);
     }
-  };
+  }, [audioData, duration, splits, isPlaying, removeSplit, playAudio, debugLog]);
 
-  const handleCanvasMouseUp = () => {
+  const handleCanvasMouseUp = useCallback(() => {
     setDraggingSplit(null);
-  };
+  }, []);
 
-  const handleCanvasMouseLeave = () => {
+  const handleCanvasMouseLeave = useCallback(() => {
     setHoveredSplit(null);
     // Don't clear dragging state on mouse leave - let global mouseup handle it
     const canvas = canvasRef.current;
     if (canvas) canvas.style.cursor = 'default';
-  };
+  }, []);
 
   const downloadSplits = async () => {
     if (!audioBuffer || splits.length === 0) return;
