@@ -12,7 +12,10 @@
       "Bash(npm run dev:*)",
       "Bash(fnm install:*)",
       "Bash(fnm use:*)",
-      "Bash(pkill:*)"
+      "Bash(pkill:*)",
+      "Bash(npm run typecheck:*)",
+      "Bash(npm run:*)",
+      "Bash(npx tsc:*)"
     ],
     "deny": []
   }

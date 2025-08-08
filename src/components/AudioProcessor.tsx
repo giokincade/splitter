@@ -9,7 +9,7 @@ import { audioCache } from '../lib/audioCache';
 interface AudioProcessorProps {
   audioFile: File;
   splits: Split[];
-  setSplits: (splits: Split[]) => void;
+  setSplits: React.Dispatch<React.SetStateAction<Split[]>>;
   onBack: () => void;
 }
 
@@ -38,7 +38,7 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
   const [minSilenceDuration, setMinSilenceDuration] = useState(2.0);
   const [minSongDuration, setMinSongDuration] = useState(30.0);
   const [smoothingWindow, setSmoothingWindow] = useState(5.0); // 5 second smoothing
-  const [draggingSplit, setDraggingSplit] = useState<{ splitIndex: number; edge: 'start' | 'end' } | null>(null);
+  const [draggingSplit, setDraggingSplit] = useState<{ splitId: string; edge: 'start' | 'end' } | null>(null);
   const [hoveredSplit, setHoveredSplit] = useState<{ splitIndex: number; edge: 'start' | 'end' } | null>(null);
   const [currentlyPlayingSplit, setCurrentlyPlayingSplit] = useState<number | null>(null);
   const [debugMode, setDebugMode] = useState(false);
@@ -87,12 +87,17 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
       duration,
       splitsLength: splits.length,
       currentTime,
-      hoveredSplit,
-      draggingSplit,
-      isPlaying
+      isPlaying,
+      isDragging: !!draggingSplit
     });
     
     if (audioData && audioData.length > 0 && duration > 0) {
+      // Skip re-drawing during drag for performance - HTML overlays handle visual updates
+      if (draggingSplit) {
+        debugLog('EFFECT', 'Skipping waveform redraw during drag');
+        return;
+      }
+      
       debugLog('EFFECT', 'Scheduling waveform draw');
       // Use requestAnimationFrame to ensure canvas is ready
       requestAnimationFrame(() => {
@@ -108,7 +113,7 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
         duration
       });
     }
-  }, [audioData, splits, currentTime, hoveredSplit, draggingSplit, isPlaying, duration, debugLog]);
+  }, [audioData, splits, currentTime, isPlaying, duration, draggingSplit, debugLog]);
 
 
   const processAudioFile = async () => {
@@ -634,6 +639,9 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
     const canvas = canvasRef.current;
     if (!canvas || !audioData || duration <= 0) return;
     
+    // Don't handle canvas clicks if we're currently dragging a marker
+    if (draggingSplit) return;
+    
     const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const waveformWidth = rect.width;
@@ -647,7 +655,7 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
     if (!isPlaying) {
       playAudio(newTime);
     }
-  }, [audioData, duration, isPlaying, playAudio]);
+  }, [audioData, duration, isPlaying, playAudio, draggingSplit]);
 
   const handleCanvasMouseLeave = useCallback(() => {
     const canvas = canvasRef.current;
@@ -655,14 +663,37 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
   }, []);
 
   // New handlers for HTML marker elements
-  const handleMarkerMouseDown = useCallback((e: React.MouseEvent, splitIndex: number, edge: 'start' | 'end') => {
+  const handleMarkerMouseDown = useCallback((e: React.MouseEvent, splitId: string, edge: 'start' | 'end') => {
     e.preventDefault();
     e.stopPropagation();
-    setDraggingSplit({ splitIndex, edge });
-  }, []);
+    
+    const split = splits.find(s => s.id === splitId);
+    debugLog('DRAG', 'Marker mouse down', {
+      splitId,
+      edge,
+      splitName: split?.name
+    });
+    
+    setDraggingSplit({ splitId, edge });
+  }, [splits, debugLog]);
 
+  const lastDragUpdateRef = useRef<number>(0);
+  
   const handleGlobalMouseMove = useCallback((e: MouseEvent) => {
     if (!draggingSplit || !canvasRef.current || !audioData || duration <= 0) return;
+    
+    // Throttle drag updates to prevent excessive re-renders
+    const now = Date.now();
+    if (now - lastDragUpdateRef.current < 16) { // ~60fps
+      return;
+    }
+    lastDragUpdateRef.current = now;
+    
+    debugLog('DRAG', 'Global mouse move during drag', {
+      draggingSplit,
+      splitId: draggingSplit.splitId,
+      edge: draggingSplit.edge
+    });
     
     const rect = canvasRef.current.getBoundingClientRect();
     const x = e.clientX - rect.left;
@@ -672,10 +703,24 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
     const relativeX = Math.max(0, Math.min(1, x / waveformWidth));
     const newTime = relativeX * duration;
     
-    // Validate split index exists
-    if (draggingSplit.splitIndex >= 0 && draggingSplit.splitIndex < splits.length) {
-      const updatedSplits = [...splits];
-      const split = updatedSplits[draggingSplit.splitIndex];
+    // Find split by ID and update it
+    setSplits(currentSplits => {
+      const updatedSplits = [...currentSplits];
+      const splitIndex = updatedSplits.findIndex(s => s.id === draggingSplit.splitId);
+      
+      if (splitIndex === -1) {
+        debugLog('DRAG', 'ERROR: Split not found with ID', draggingSplit.splitId);
+        return currentSplits; // Return unchanged if split doesn't exist
+      }
+      
+      const split = updatedSplits[splitIndex];
+      if (!split) {
+        debugLog('DRAG', 'ERROR: Split is null at found index', splitIndex);
+        return currentSplits;
+      }
+      
+      const originalStartTime = split.startTime;
+      const originalEndTime = split.endTime;
       
       if (draggingSplit.edge === 'start') {
         split.startTime = Math.max(0, Math.min(newTime, split.endTime - 1));
@@ -683,19 +728,33 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
         split.endTime = Math.max(split.startTime + 1, Math.min(newTime, duration));
       }
       
-      // Filter out any invalid splits and update
-      const validSplits = updatedSplits.filter(s => 
-        s.startTime >= 0 && 
-        s.endTime <= duration && 
-        s.startTime < s.endTime
-      );
-      setSplits(validSplits);
-    }
-  }, [draggingSplit, audioData, duration, splits, setSplits]);
+      // Only update if change is significant to prevent micro-updates
+      const startChanged = Math.abs(split.startTime - originalStartTime) > 0.1;
+      const endChanged = Math.abs(split.endTime - originalEndTime) > 0.1;
+      
+      if (!startChanged && !endChanged) {
+        return currentSplits; // No significant change
+      }
+      
+      debugLog('DRAG', 'Updating split', {
+        splitId: draggingSplit.splitId,
+        splitIndex: splitIndex,
+        edge: draggingSplit.edge,
+        oldStart: originalStartTime,
+        newStart: split.startTime,
+        oldEnd: originalEndTime,
+        newEnd: split.endTime
+      });
+      
+      // Return updated splits, no filtering to prevent accidental removal
+      return updatedSplits;
+    });
+  }, [draggingSplit, audioData, duration, debugLog]);
 
   const handleGlobalMouseUp = useCallback(() => {
+    debugLog('DRAG', 'Global mouse up - ending drag', { draggingSplit });
     setDraggingSplit(null);
-  }, []);
+  }, [draggingSplit, debugLog]);
 
   // Global mouse event listeners for dragging
   useEffect(() => {
@@ -712,7 +771,7 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
   const downloadSplits = async () => {
     if (!audioBuffer || splits.length === 0) return;
     
-    const JSZip = (await import('jszip')).default;
+    const { default: JSZip } = await import('jszip');
     const zip = new JSZip();
     
     for (const split of splits) {
@@ -895,8 +954,8 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
                 
                 const startPercent = (split.startTime / duration) * 100;
                 const endPercent = (split.endTime / duration) * 100;
-                const isStartDragging = draggingSplit?.splitIndex === index && draggingSplit?.edge === 'start';
-                const isEndDragging = draggingSplit?.splitIndex === index && draggingSplit?.edge === 'end';
+                const isStartDragging = draggingSplit?.splitId === split.id && draggingSplit?.edge === 'start';
+                const isEndDragging = draggingSplit?.splitId === split.id && draggingSplit?.edge === 'end';
                 
                 return (
                   <div key={split.id}>
@@ -912,7 +971,7 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
                         isStartDragging ? 'bg-red-600' : 'bg-red-500 hover:bg-red-600'
                       } transform -translate-x-1`}
                       style={{ left: `${startPercent}%` }}
-                      onMouseDown={(e) => handleMarkerMouseDown(e, index, 'start')}
+                      onMouseDown={(e) => handleMarkerMouseDown(e, split.id, 'start')}
                       title={`${split.name} - Start`}
                     />
                     
@@ -928,7 +987,7 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
                         isEndDragging ? 'bg-red-600' : 'bg-red-500 hover:bg-red-600'
                       } transform -translate-x-1`}
                       style={{ left: `${endPercent}%` }}
-                      onMouseDown={(e) => handleMarkerMouseDown(e, index, 'end')}
+                      onMouseDown={(e) => handleMarkerMouseDown(e, split.id, 'end')}
                       title={`${split.name} - End`}
                     />
                     
