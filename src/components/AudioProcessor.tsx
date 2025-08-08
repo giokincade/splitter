@@ -110,16 +110,6 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
     }
   }, [audioData, splits, currentTime, hoveredSplit, draggingSplit, isPlaying, duration, debugLog]);
 
-  useEffect(() => {
-    const handleGlobalMouseUp = () => {
-      setDraggingSplit(null);
-    };
-
-    if (draggingSplit) {
-      document.addEventListener('mouseup', handleGlobalMouseUp);
-      return () => document.removeEventListener('mouseup', handleGlobalMouseUp);
-    }
-  }, [draggingSplit]);
 
   const processAudioFile = async () => {
     try {
@@ -492,67 +482,7 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
       debugLog('DRAW', 'ERROR during waveform rendering', error);
     }
     
-    // Draw split markers with hover/drag states (simplified layout)
-    debugLog('DRAW', 'Drawing split markers', { splitsCount: splits.length });
-    
-    splits.forEach((split, index) => {
-      // Ensure times are valid
-      if (split.startTime < 0 || split.endTime > duration || split.startTime >= split.endTime) {
-        debugLog('DRAW', 'Skipping invalid split', { 
-          index, 
-          split: { 
-            startTime: split.startTime, 
-            endTime: split.endTime, 
-            name: split.name 
-          },
-          duration 
-        });
-        return; // Skip invalid splits
-      }
-      
-      const startX = Math.round((split.startTime / duration) * width);
-      const endX = Math.round((split.endTime / duration) * width);
-      
-      // Check if this split is being hovered or dragged
-      const isStartHovered = hoveredSplit?.splitIndex === index && hoveredSplit?.edge === 'start';
-      const isEndHovered = hoveredSplit?.splitIndex === index && hoveredSplit?.edge === 'end';
-      const isStartDragging = draggingSplit?.splitIndex === index && draggingSplit?.edge === 'start';
-      const isEndDragging = draggingSplit?.splitIndex === index && draggingSplit?.edge === 'end';
-      
-      // Split start line
-      ctx.strokeStyle = isStartHovered || isStartDragging ? '#dc2626' : '#ef4444';
-      ctx.lineWidth = isStartHovered || isStartDragging ? 3 : 2;
-      ctx.beginPath();
-      ctx.moveTo(startX, 0);
-      ctx.lineTo(startX, height);
-      ctx.stroke();
-      
-      // Split end line
-      ctx.strokeStyle = isEndHovered || isEndDragging ? '#dc2626' : '#ef4444';
-      ctx.lineWidth = isEndHovered || isEndDragging ? 3 : 2;
-      ctx.beginPath();
-      ctx.moveTo(endX, 0);
-      ctx.lineTo(endX, height);
-      ctx.stroke();
-      
-      // Drag handles (small circles at top)
-      const handleRadius = 4;
-      ctx.fillStyle = isStartHovered || isStartDragging ? '#dc2626' : '#ef4444';
-      ctx.beginPath();
-      ctx.arc(startX, 10, handleRadius, 0, Math.PI * 2);
-      ctx.fill();
-      
-      ctx.fillStyle = isEndHovered || isEndDragging ? '#dc2626' : '#ef4444';
-      ctx.beginPath();
-      ctx.arc(endX, 10, handleRadius, 0, Math.PI * 2);
-      ctx.fill();
-      
-      // Label
-      ctx.fillStyle = '#ef4444';
-      ctx.font = '12px sans-serif';
-      ctx.textAlign = 'left';
-      ctx.fillText(split.name, startX + 4, 26);
-    });
+    debugLog('DRAW', 'Waveform drawing complete - markers now handled by HTML overlay');
     
     // Draw current time indicator
     if (currentTime > 0) {
@@ -693,100 +623,12 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
   };
 
   const handleCanvasMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    // Canvas now only handles waveform interaction, markers are HTML elements
     const canvas = canvasRef.current;
-    if (!canvas || !audioData || duration <= 0) {
-      debugLog('MOUSE', 'MouseMove early return', {
-        hasCanvas: !!canvas,
-        hasAudioData: !!audioData,
-        duration
-      });
-      return;
-    }
+    if (!canvas || !audioData || duration <= 0) return;
     
-    const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    
-    const waveformWidth = rect.width; // Use actual rendered width
-    
-    debugLog('MOUSE', 'MouseMove', {
-      x, y, waveformWidth,
-      draggingSplit,
-      splitsLength: splits.length
-    });
-    
-    if (draggingSplit) {
-      // Update split position while dragging
-      const relativeX = Math.max(0, Math.min(1, x / waveformWidth));
-      const newTime = relativeX * duration;
-      
-      // Validate split index exists
-      if (draggingSplit.splitIndex >= 0 && draggingSplit.splitIndex < splits.length) {
-        const updatedSplits = [...splits];
-        const split = updatedSplits[draggingSplit.splitIndex];
-        
-        if (draggingSplit.edge === 'start') {
-          split.startTime = Math.max(0, Math.min(newTime, split.endTime - 1));
-        } else {
-          split.endTime = Math.max(split.startTime + 1, Math.min(newTime, duration));
-        }
-        
-        // Filter out any invalid splits and update
-        const validSplits = updatedSplits.filter(s => 
-          s.startTime >= 0 && 
-          s.endTime <= duration && 
-          s.startTime < s.endTime
-        );
-        debugLog('STATE', 'Updating splits after drag', {
-          originalCount: updatedSplits.length,
-          validCount: validSplits.length,
-          draggingSplit
-        });
-        setSplits(validSplits);
-      }
-      return;
-    }
-    
-    // Check for hover over split handles - be more precise
-    let newHovered: typeof hoveredSplit = null;
-    const handleRadius = 8; // Slightly larger hit area
-    
-    debugLog('MOUSE', 'Checking hover detection', {
-      splitsCount: splits.length,
-      handleRadius,
-      mouseY: y
-    });
-    
-    for (let i = 0; i < splits.length; i++) {
-      const split = splits[i];
-      const startX = (split.startTime / duration) * waveformWidth;
-      const endX = (split.endTime / duration) * waveformWidth;
-      
-      debugLog('MOUSE', `Split ${i} positions`, {
-        splitName: split.name,
-        startX, endX,
-        startDistance: Math.abs(x - startX),
-        endDistance: Math.abs(x - endX),
-        withinRadius: Math.abs(x - startX) < handleRadius || Math.abs(x - endX) < handleRadius
-      });
-      
-      // Check start handle first (higher priority)
-      if (Math.abs(x - startX) < handleRadius && y < 30) {
-        newHovered = { splitIndex: i, edge: 'start' };
-        debugLog('MOUSE', 'Hovering start handle', { splitIndex: i });
-        break;
-      } else if (Math.abs(x - endX) < handleRadius && y < 30) {
-        newHovered = { splitIndex: i, edge: 'end' };
-        debugLog('MOUSE', 'Hovering end handle', { splitIndex: i });
-        break;
-      }
-    }
-    
-    setHoveredSplit(newHovered);
-    
-    // Update cursor
-    canvas.style.cursor = newHovered ? 'ew-resize' : 'pointer';
-  }, [audioData, duration, splits, draggingSplit, hoveredSplit, debugLog]);
+    canvas.style.cursor = 'pointer';
+  }, [audioData, duration]);
 
   const handleCanvasMouseDown = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
@@ -794,39 +636,9 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
     
     const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    
     const waveformWidth = rect.width;
-    const handleRadius = 8;
     
-    // Check for clicks on split handles first (priority over other actions)
-    for (let i = 0; i < splits.length; i++) {
-      const split = splits[i];
-      const startX = (split.startTime / duration) * waveformWidth;
-      const endX = (split.endTime / duration) * waveformWidth;
-      
-      // Check start handle
-      if (Math.abs(x - startX) < handleRadius && y < 30) {
-        setDraggingSplit({ splitIndex: i, edge: 'start' });
-        e.preventDefault();
-        return;
-      } 
-      // Check end handle
-      else if (Math.abs(x - endX) < handleRadius && y < 30) {
-        setDraggingSplit({ splitIndex: i, edge: 'end' });
-        e.preventDefault();
-        return;
-      }
-      
-      // Check for right-click to remove split (anywhere in split region)
-      if (e.button === 2 && x >= startX && x <= endX && y > 30) {
-        e.preventDefault();
-        removeSplit(i);
-        return;
-      }
-    }
-    
-    // If not clicking on a handle, click-to-play functionality
+    // Canvas now only handles click-to-play functionality
     const relativeX = Math.max(0, Math.min(1, x / waveformWidth));
     const newTime = relativeX * duration;
     setCurrentTime(newTime);
@@ -835,18 +647,67 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
     if (!isPlaying) {
       playAudio(newTime);
     }
-  }, [audioData, duration, splits, isPlaying, removeSplit, playAudio, debugLog]);
-
-  const handleCanvasMouseUp = useCallback(() => {
-    setDraggingSplit(null);
-  }, []);
+  }, [audioData, duration, isPlaying, playAudio]);
 
   const handleCanvasMouseLeave = useCallback(() => {
-    setHoveredSplit(null);
-    // Don't clear dragging state on mouse leave - let global mouseup handle it
     const canvas = canvasRef.current;
     if (canvas) canvas.style.cursor = 'default';
   }, []);
+
+  // New handlers for HTML marker elements
+  const handleMarkerMouseDown = useCallback((e: React.MouseEvent, splitIndex: number, edge: 'start' | 'end') => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDraggingSplit({ splitIndex, edge });
+  }, []);
+
+  const handleGlobalMouseMove = useCallback((e: MouseEvent) => {
+    if (!draggingSplit || !canvasRef.current || !audioData || duration <= 0) return;
+    
+    const rect = canvasRef.current.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const waveformWidth = rect.width;
+    
+    // Update split position while dragging
+    const relativeX = Math.max(0, Math.min(1, x / waveformWidth));
+    const newTime = relativeX * duration;
+    
+    // Validate split index exists
+    if (draggingSplit.splitIndex >= 0 && draggingSplit.splitIndex < splits.length) {
+      const updatedSplits = [...splits];
+      const split = updatedSplits[draggingSplit.splitIndex];
+      
+      if (draggingSplit.edge === 'start') {
+        split.startTime = Math.max(0, Math.min(newTime, split.endTime - 1));
+      } else {
+        split.endTime = Math.max(split.startTime + 1, Math.min(newTime, duration));
+      }
+      
+      // Filter out any invalid splits and update
+      const validSplits = updatedSplits.filter(s => 
+        s.startTime >= 0 && 
+        s.endTime <= duration && 
+        s.startTime < s.endTime
+      );
+      setSplits(validSplits);
+    }
+  }, [draggingSplit, audioData, duration, splits, setSplits]);
+
+  const handleGlobalMouseUp = useCallback(() => {
+    setDraggingSplit(null);
+  }, []);
+
+  // Global mouse event listeners for dragging
+  useEffect(() => {
+    if (draggingSplit) {
+      document.addEventListener('mousemove', handleGlobalMouseMove);
+      document.addEventListener('mouseup', handleGlobalMouseUp);
+      return () => {
+        document.removeEventListener('mousemove', handleGlobalMouseMove);
+        document.removeEventListener('mouseup', handleGlobalMouseUp);
+      };
+    }
+  }, [draggingSplit, handleGlobalMouseMove, handleGlobalMouseUp]);
 
   const downloadSplits = async () => {
     if (!audioBuffer || splits.length === 0) return;
@@ -1014,17 +875,96 @@ export default function AudioProcessor({ audioFile, splits, setSplits, onBack }:
             </div>
           </CardHeader>
           <CardContent className="space-y-4">
-            <canvas
-              ref={canvasRef}
-              width={800}
-              height={200}
-              className="w-full border rounded cursor-default"
-              onMouseMove={handleCanvasMouseMove}
-              onMouseDown={handleCanvasMouseDown}
-              onMouseUp={handleCanvasMouseUp}
-              onMouseLeave={handleCanvasMouseLeave}
-              onContextMenu={(e) => e.preventDefault()}
-            />
+            <div className="relative w-full">
+              <canvas
+                ref={canvasRef}
+                width={800}
+                height={200}
+                className="w-full border rounded cursor-default"
+                onMouseMove={handleCanvasMouseMove}
+                onMouseDown={handleCanvasMouseDown}
+                onMouseLeave={handleCanvasMouseLeave}
+                onContextMenu={(e) => e.preventDefault()}
+              />
+              
+              {/* HTML Marker Overlay */}
+              {splits.map((split, index) => {
+                if (split.startTime < 0 || split.endTime > duration || split.startTime >= split.endTime) {
+                  return null; // Skip invalid splits
+                }
+                
+                const startPercent = (split.startTime / duration) * 100;
+                const endPercent = (split.endTime / duration) * 100;
+                const isStartDragging = draggingSplit?.splitIndex === index && draggingSplit?.edge === 'start';
+                const isEndDragging = draggingSplit?.splitIndex === index && draggingSplit?.edge === 'end';
+                
+                return (
+                  <div key={split.id}>
+                    {/* Start marker line and handle */}
+                    <div
+                      className={`absolute top-0 bottom-0 w-0.5 ${
+                        isStartDragging ? 'bg-red-600' : 'bg-red-500'
+                      } pointer-events-none`}
+                      style={{ left: `${startPercent}%` }}
+                    />
+                    <div
+                      className={`absolute top-2 w-2 h-2 rounded-full cursor-ew-resize ${
+                        isStartDragging ? 'bg-red-600' : 'bg-red-500 hover:bg-red-600'
+                      } transform -translate-x-1`}
+                      style={{ left: `${startPercent}%` }}
+                      onMouseDown={(e) => handleMarkerMouseDown(e, index, 'start')}
+                      title={`${split.name} - Start`}
+                    />
+                    
+                    {/* End marker line and handle */}
+                    <div
+                      className={`absolute top-0 bottom-0 w-0.5 ${
+                        isEndDragging ? 'bg-red-600' : 'bg-red-500'
+                      } pointer-events-none`}
+                      style={{ left: `${endPercent}%` }}
+                    />
+                    <div
+                      className={`absolute top-2 w-2 h-2 rounded-full cursor-ew-resize ${
+                        isEndDragging ? 'bg-red-600' : 'bg-red-500 hover:bg-red-600'
+                      } transform -translate-x-1`}
+                      style={{ left: `${endPercent}%` }}
+                      onMouseDown={(e) => handleMarkerMouseDown(e, index, 'end')}
+                      title={`${split.name} - End`}
+                    />
+                    
+                    {/* Song label */}
+                    <div
+                      className="absolute top-6 text-xs font-medium text-red-600 pointer-events-none whitespace-nowrap"
+                      style={{ left: `${startPercent}%` }}
+                    >
+                      {split.name}
+                    </div>
+                    
+                    {/* Right-click to remove functionality */}
+                    <div
+                      className="absolute top-8 bottom-0 bg-transparent cursor-pointer"
+                      style={{ 
+                        left: `${startPercent}%`, 
+                        width: `${endPercent - startPercent}%` 
+                      }}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        removeSplit(index);
+                      }}
+                      title={`Right-click to remove ${split.name}`}
+                    />
+                  </div>
+                );
+              })}
+              
+              {/* Current time indicator */}
+              {currentTime > 0 && (
+                <div
+                  className="absolute top-0 bottom-0 w-0.5 bg-green-500 pointer-events-none"
+                  style={{ left: `${(currentTime / duration) * 100}%` }}
+                />
+              )}
+            </div>
             
             <div className="flex items-center justify-center space-x-4">
               <Button
